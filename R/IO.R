@@ -1003,333 +1003,335 @@ update_channel_by_alias <- function(orig_chnl_names, channel_alias, silent = FAL
 ## read FCS file data section
 ## - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 readFCSdata <- function(con, offsets, x, transformation, which.lines,
-                        scale, alter.names, decades, min.limit=-111, truncate_max_range = TRUE, channel_alias = NULL) {
-    
-    byte_order <- readFCSgetPar(x, "$BYTEORD")  
-    endian <- switch(byte_order,
-                     "4,3,2,1" = "big",
-                     "2,1" = "big",
-                     "1,2" = "little",
-                     "1,2,3,4" = "little",
-                     "mixed")
-    
-    dattype <- switch(readFCSgetPar(x, "$DATATYPE"),
-                      "I" = "integer",
-                      "F" = "numeric",
-                      "D" = "numeric",
-                      stop(paste("Don't know how to deal with $DATATYPE",
-                                 readFCSgetPar(x, "$DATATYPE"))))
+                        scale, alter.names, decades, min.limit=-111,
+                        truncate_max_range = TRUE, channel_alias = NULL) {
+  
+  byte_order <- readFCSgetPar(x, "$BYTEORD")  
+  # TODO mixed not allowed in 3.2
+  endian <- switch(byte_order,
+                   "4,3,2,1" = "big",
+                   "2,1" = "big",
+                   "1,2" = "little",
+                   "1,2,3,4" = "little",
+                   "mixed")
+  
+  # NOTE this apparently can't parse ASCII files
+  dattype <- switch(readFCSgetPar(x, "$DATATYPE"),
+                    "I" = "integer",
+                    "F" = "numeric",
+                    "D" = "numeric",
+                    stop(paste("Don't know how to deal with $DATATYPE",
+                               readFCSgetPar(x, "$DATATYPE"))))
 
-    if (readFCSgetPar(x, "$MODE") != "L")
-        stop(paste("Don't know how to deal with $MODE",
-                   readFCSgetPar(x, "$MODE")))
+  # NOTE pretty sure this can be other stuff in earlier versions
+  if (readFCSgetPar(x, "$MODE") != "L")
+    stop(paste("Don't know how to deal with $MODE",
+               readFCSgetPar(x, "$MODE")))
 
-    nrpar    <- as.integer(readFCSgetPar(x, "$PAR"))
-    nrowTotal <- as.integer(readFCSgetPar(x, "$TOT"))
+  nrpar    <- as.integer(readFCSgetPar(x, "$PAR"))
+  nrowTotal <- as.integer(readFCSgetPar(x, "$TOT"))
 
-    if( "transformation" %in% names(x) &&  x[["transformation"]] == "custom"){
-      range_str <- sapply(seq_len(nrpar),function(k){
-                x[[sprintf("flowCore_$P%sRmax", k)]]
-             })
-    } else {
-        range_str <- readFCSgetPar(x, paste("$P", 1:nrpar, "R", sep=""))
+  # TODO why is this here?
+  if( "transformation" %in% names(x) &&  x[["transformation"]] == "custom"){
+    range_str <- sapply(seq_len(nrpar),function(k){
+      x[[sprintf("flowCore_$P%sRmax", k)]]
+    })
+  } else {
+    range_str <- readFCSgetPar(x, paste("$P", 1:nrpar, "R", sep=""))
+  }
+
+  bitwidth_vec <- as.integer(readFCSgetPar(x, paste("$P", 1:nrpar, "B", sep="")))
+  bitwidth <- unique(bitwidth_vec)
+  multiSize <- length(bitwidth) > 1
+
+  if(dattype=="numeric"&&multiSize)
+    stop("Sorry, Numeric data type expects the same bitwidth for all parameters!")
+
+  # TODO this will need to change for 3.2
+  if(dattype=="integer"){
+    suppressWarnings(range <- as.integer(range_str))
+
+    #when any channel has range > 2147483647 (i.e. 2^31-1)
+    # NA Also occurs if coercion fails for any reason (e.g. non-numeric string like "NA")
+    if(any(is.na(range)))
+      range <-suppressWarnings(as.numeric(range_str))
+
+    if(any(is.na(range)))#throws if still fails
+      stop('$PnR "', range_str[is.na(range)][1], " is invalid. If it is a numeric string, this could be because it is larger than R's integer limit: ", .Machine$integer.max)
+    else if(any(range>2^32)){
+      #check if larger than C's uint32 limit ,which should be 2^32-1
+      #but strangely(and inaccurately) these flow data uses 2^32 to specifiy the upper bound of 32 uint
+      #we try to tolerate this and hopefully there is no such extreme value exsiting in the actual data section
+      stop("$PnR ", range_str[range>2^32][1], " is invalid. If it is a numeric string, this could be because it is larger than C's uint32 limit:", 2^32-1)
     }
-
-    bitwidth_vec <- as.integer(readFCSgetPar(x, paste("$P", 1:nrpar, "B", sep="")))
-    bitwidth <- unique(bitwidth_vec)
-    multiSize <- length(bitwidth) > 1
-
-    if(dattype=="numeric"&&multiSize)
-      stop("Sorry, Numeric data type expects the same bitwidth for all parameters!")
-
-
-    if(dattype=="integer"){
-      suppressWarnings(range <- as.integer(range_str))
-
-      #when any channel has range > 2147483647 (i.e. 2^31-1)
-      # NA Also occurs if coercion fails for any reason (e.g. non-numeric string like "NA")
-      if(any(is.na(range)))
-        range <-suppressWarnings(as.numeric(range_str))
-
-      if(any(is.na(range)))#throws if still fails
-        stop('$PnR "', range_str[is.na(range)][1], " is invalid. If it is a numeric string, this could be because it is larger than R's integer limit: ", .Machine$integer.max)
-      else if(any(range>2^32)){
-        #check if larger than C's uint32 limit ,which should be 2^32-1
-        #but strangely(and inaccurately) these flow data uses 2^32 to specifiy the upper bound of 32 uint
-        #we try to tolerate this and hopefully there is no such extreme value exsiting in the actual data section
-        stop("$PnR ", range_str[range>2^32][1], " is invalid. If it is a numeric string, this could be because it is larger than C's uint32 limit:", 2^32-1)
-      }
-
-      if(multiSize){
-        splitInt <- FALSE
-      }else
-      {
-        splitInt <- bitwidth == 32
-      }
-
-    }
-    else{
-      splitInt <- FALSE
-      range <- suppressWarnings(as.numeric(range_str))
-      if(any(is.na(range)))
-        warning("$PnR ", range_str[is.na(range)][1], " is invalid. If it is a numeric string, this could be because it is larger than R's numeric limit: ", .Machine$double.xmax,
-             ". The assigned $PnR value will be imputed from the maximum value of the data in this channel.")
-    }
-
-
-
-    if(!multiSize){
-      if(bitwidth==10){
-        if(!gsub(" " ,"", tolower(readFCSgetPar(x, "$SYS"))) ==  "cxp")
-          stop("Invalid bitwidth specification.\nThis is a known bug in Beckman ",
-                  "Coulter's CPX software.\nThe data might be corrupted if produced ",
-                  "by another software.", call.=FALSE)
-        else
-          stop("Beckman Coulter CPX data.\nCorrected for invalid bitwidth 10.",
-                  call.=FALSE)
-        bitwidth <- 16
-      }
-    }
-    # multiSize <- T
 
     if(multiSize){
-      size <- bitwidth_vec/8
-      signed <- FALSE #dummy. not used in mutliSize logic.
-    }else{
-      size <- bitwidth/8
-
-      # since signed = FALSE is not supported by readBin when size > 2
-      # we set it to TRUE automatically then to avoid warning flooded by readBin
-      # It shouldn't cause data clipping since we haven't found any use case where datatype is unsigned integer with size > 16bits
-      signed <- !(size%in%c(1,2))
+      splitInt <- FALSE
+    }else
+    {
+      splitInt <- bitwidth == 32
     }
 
+  }
+  else{
+    splitInt <- FALSE
+    range <- suppressWarnings(as.numeric(range_str))
+    if(any(is.na(range)))
+      warning("$PnR ", range_str[is.na(range)][1], " is invalid. If it is a numeric string, this could be because it is larger than R's numeric limit: ", .Machine$double.xmax,
+              ". The assigned $PnR value will be imputed from the maximum value of the data in this channel.")
+  }
 
-    if(is.null(which.lines)){
-      # Read the entire file.
-      seek(con, offsets["datastart"])
-      nBytes <- offsets["dataend"] - offsets["datastart"] + 1
+  # NOTE exception for random machine that doesn't play by the rules
+  if(!multiSize){
+    if(bitwidth==10){
+      if(!gsub(" " ,"", tolower(readFCSgetPar(x, "$SYS"))) ==  "cxp")
+        stop("Invalid bitwidth specification.\nThis is a known bug in Beckman ",
+             "Coulter's CPX software.\nThe data might be corrupted if produced ",
+             "by another software.", call.=FALSE)
+      else
+        stop("Beckman Coulter CPX data.\nCorrected for invalid bitwidth 10.",
+             call.=FALSE)
+      bitwidth <- 16
+    }
+  }
+  # multiSize <- T
 
-	    if (multiSize) {
-        if (nBytes > .Machine$integer.max) {
-          stop(
-            paste0("cannot import files with more than ", .Machine$integer.max,
-                   " bytes in data segment when file has multiple bitwidths")
-          )
-        }
-        nBytes <- as.integer(nBytes)
+  if(multiSize){
+    size <- bitwidth_vec/8
+    signed <- FALSE #dummy. not used in mutliSize logic.
+  }else{
+    size <- bitwidth/8
 
-#	      if(splitInt&&dattype=="integer")
-#	        stop("Mutliple bitwidths with big integer are not supported!")
-	      if(endian == "mixed")
-	        stop("Cant't handle diverse bitwidths while endian is mixed: ", byte_order)
-	      
-	      bytes <- readBin(con=con, what="raw",n = nBytes, size = 1)
-	      # browser()
-	      if(dattype == "numeric" && length(unique(size)) > 1)
-	        stop("we don't support different bitwdiths for numeric data type!")
-	    } else {
-	      dat <-
-          .readFCSdataRawMultiple(
-            con, dattype, count = nBytes / size, size = size, signed = signed,
-            endian=endian, splitInt = splitInt, byte_order = byte_order)
-	    }
+    # since signed = FALSE is not supported by readBin when size > 2
+    # we set it to TRUE automatically then to avoid warning flooded by readBin
+    # It shouldn't cause data clipping since we haven't found any use case where datatype is unsigned integer with size > 16bits
+    signed <- !(size%in%c(1,2))
+  }
+
+  if(is.null(which.lines)){
+    # Read the entire file.
+    seek(con, offsets["datastart"])
+    nBytes <- offsets["dataend"] - offsets["datastart"] + 1
+
+    # NOTE; if I understand this correctly, it should never run because "bytes"
+    # doesn't appear to be used anywhere. The only way this makes sense is if
+    # one of these functions works by side effect
+    if (multiSize) {
+      if (nBytes > .Machine$integer.max) {
+        stop(
+          paste0("cannot import files with more than ", .Machine$integer.max,
+                 " bytes in data segment when file has multiple bitwidths")
+        )
+      }
+      nBytes <- as.integer(nBytes)
+
+      #	      if(splitInt&&dattype=="integer")
+      #	        stop("Mutliple bitwidths with big integer are not supported!")
+      # TODO not allowed in 3.2
+      if(endian == "mixed")
+        stop("Cant't handle diverse bitwidths while endian is mixed: ", byte_order)
+      
+      # TODO this confuses me, I don't see where this value is used ever again
+      bytes <- readBin(con=con, what="raw",n = nBytes, size = 1)
+      # browser()
+      if(dattype == "numeric" && length(unique(size)) > 1)
+        stop("we don't support different bitwdiths for numeric data type!")
     } else {
-      # Read subset of lines, as selected by user.
-      if (multiSize) {
-        stop("'which.lines' cannot be used with multiple bitwidths")
-      }
+      # NOTE ...in this case, this is the only bit here that matters
+      # TODO datatype should be a vector (per column)
+      dat <-
+        .readFCSdataRawMultiple(
+          con, dattype, count = nBytes / size, size = size, signed = signed,
+          endian=endian, splitInt = splitInt, byte_order = byte_order)
+    }
+  } else {
+    # Read subset of lines, as selected by user.
+    if (multiSize) {
+      stop("'which.lines' cannot be used with multiple bitwidths")
+    }
 
-      # Verify that which.lines is positive and within file limit.
-      if (length(which.lines) > 1) {
-        if (any(which.lines < 0)) {
-          warning("import will skip lines with negative indices")
-          which.lines <- which.lines[which.lines > 0]
-        }
-        if (any(which.lines > nrowTotal)) {
-          warning("import will skip lines over number of collected events")
-          which.lines <- which.lines[which.lines < nrowTotal]
-        }
+    # Verify that which.lines is positive and within file limit.
+    if (length(which.lines) > 1) {
+      if (any(which.lines < 0)) {
+        warning("import will skip lines with negative indices")
+        which.lines <- which.lines[which.lines > 0]
       }
-
-      if (length(which.lines) == 1) {
-        # If a single value is given, sample N lines randomly.
-        which.lines <- sample(seq(nrowTotal), which.lines)
-      }
-
-      which.lines <- sort(which.lines)
-      dat <- c()
-      for (i in 1:length(which.lines)){
-        startP <- offsets["datastart"] + (which.lines[i] - 1) * nrpar * size
-        endP   <- startP + nrpar * size
-        seek(con, startP)
-        temp <-
-          .readFCSdataRawMultiple(
-            con, dattype, count = as.integer(endP - startP + 1) / size,
-            size = size, signed = signed, endian = endian, splitInt = splitInt,
-            byte_order = byte_order)
-        dat <- c(dat, temp)
+      if (any(which.lines > nrowTotal)) {
+        warning("import will skip lines over number of collected events")
+        which.lines <- which.lines[which.lines < nrowTotal]
       }
     }
 
-    ## stopifnot(length(dat)%%nrpar==0)
-    ## Do we want the function to bail out when the above condition is TRUE?
-    ## Might be better to assume the data was ok up to this point and
-    ## exit gracefully with a warning as done in the following lines...
-    ld <- length(dat)
-    if(ld %% nrpar != 0){
-        dat <- dat[1:(ld - (ld %% nrpar))]
-        warning("Error in reading data stream for file '",
-                summary(con)$description, "'/nData may be truncated!")
+    if (length(which.lines) == 1) {
+      # If a single value is given, sample N lines randomly.
+      which.lines <- sample(seq(nrowTotal), which.lines)
     }
 
+    which.lines <- sort(which.lines)
+    dat <- c()
+    for (i in 1:length(which.lines)){
+      startP <- offsets["datastart"] + (which.lines[i] - 1) * nrpar * size
+      endP   <- startP + nrpar * size
+      seek(con, startP)
+      temp <-
+        .readFCSdataRawMultiple(
+          con, dattype, count = as.integer(endP - startP + 1) / size,
+          size = size, signed = signed, endian = endian, splitInt = splitInt,
+          byte_order = byte_order)
+      dat <- c(dat, temp)
+    }
+  }
 
-    ## apply bitmask for integer data
-    if(dattype=="integer"){
-        if(length(unique(range))==1)
+  ## stopifnot(length(dat)%%nrpar==0)
+  ## Do we want the function to bail out when the above condition is TRUE?
+  ## Might be better to assume the data was ok up to this point and
+  ## exit gracefully with a warning as done in the following lines...
+  ld <- length(dat)
+  if(ld %% nrpar != 0){
+    dat <- dat[1:(ld - (ld %% nrpar))]
+    warning("Error in reading data stream for file '",
+            summary(con)$description, "'/nData may be truncated!")
+  }
+
+  ## apply bitmask for integer data
+
+  # TODO this will need to completely change in 3.2 since dattype will be variable
+  if(dattype=="integer"){
+    if(length(unique(range))==1) {
+      if(range[1]>0){
+        usedBits <- ceiling(log2(range[1]))
+        if(usedBits<bitwidth)
+          dat <- dat %% (2^usedBits)
+      }
+
+      dat <- matrix(dat, ncol=nrpar, byrow=TRUE)
+    } else {
+      dat <- matrix(dat, ncol=nrpar, byrow=TRUE)
+      for(i in 1:ncol(dat))
+      {
+
+        if(range[i] > 0){
+          usedBits <- ceiling(log2(range[i]))
+          if(usedBits<bitwidth_vec[i])
+            dat[,i] <- dat[,i] %% (2^usedBits)
+        }
+      }
+    }
+  } else {
+    dat <- matrix(dat, ncol=nrpar, byrow=TRUE)
+    # Fill invalid/missing range/PnR values with channel maxima read from data 
+    fix_pnr_idx <- which(is.na(range))
+    if(length(fix_pnr_idx) > 0){
+      fix_pnr_vals <- colMaxs(dat, cols = fix_pnr_idx)
+      x[paste0("$P", fix_pnr_idx, "R")] <- fix_pnr_vals
+      range[fix_pnr_idx] <- fix_pnr_vals
+    }
+  }
+
+  cn  <- readFCSgetPar(x, paste("$P", 1:nrpar, "N", sep=""))
+  # TODO ????
+  cn <- update_channel_by_alias(cn, channel_alias)
+  cn <- if(alter.names)  structure(make.names(cn),names=names(cn)) else cn
+  dimnames(dat) <- list(NULL, cn)
+  ## truncate data at max range
+  if(is.na(x["transformation"])) {
+    if(truncate_max_range){
+      for(i in seq_len(ncol(dat)))
+      {
+        idx <- dat[,i]>range[i]
+        if(any(idx))
         {
-
-            if(range[1]>0){
-              usedBits <- ceiling(log2(range[1]))
-              if(usedBits<bitwidth)
-                dat <- dat %% (2^usedBits)
-            }
-
-            dat <- matrix(dat, ncol=nrpar, byrow=TRUE)
+          warning("Some data values of '", cn[i], "' channel exceed its $PnR value ", range[i], " and will be truncated!"
+                , "\n To avoid truncation, either fix $PnR before generating FCS or set 'truncate_max_range = FALSE'")
+          dat[idx,i] <- range[i]
+          
         }
-        else
-        {
-            dat <- matrix(dat, ncol=nrpar, byrow=TRUE)
-            for(i in 1:ncol(dat))
-            {
-
-                if(range[i] > 0){
-                  usedBits <- ceiling(log2(range[i]))
-                  if(usedBits<bitwidth_vec[i])
-                      dat[,i] <- dat[,i] %% (2^usedBits)
-                }
-            }
-        }
+        
+      }
     }
-    else
+
+    if(!is.null(min.limit))
     {
-        dat <- matrix(dat, ncol=nrpar, byrow=TRUE)
-        # Fill invalid/missing range/PnR values with channel maxima read from data 
-        fix_pnr_idx <- which(is.na(range))
-        if(length(fix_pnr_idx) > 0){
-          fix_pnr_vals <- colMaxs(dat, cols = fix_pnr_idx)
-          x[paste0("$P", fix_pnr_idx, "R")] <- fix_pnr_vals
-          range[fix_pnr_idx] <- fix_pnr_vals
-        }
+      idx <- dat<min.limit
+      if(any(idx)) {
+        warning("Some data value are below 'min.limit' ", min.limit, " and will be truncated"
+              , "\n To avoid truncation, set 'min.limit = NULL'")
+        dat[idx] <- min.limit
+      }
     }
+  }
 
-    cn  <- readFCSgetPar(x, paste("$P", 1:nrpar, "N", sep=""))
-    cn <- update_channel_by_alias(cn, channel_alias)
-    cn <- if(alter.names)  structure(make.names(cn),names=names(cn)) else cn
-    dimnames(dat) <- list(NULL, cn)
-    ## truncate data at max range
-    if(is.na(x["transformation"]))
-    {
-        if(truncate_max_range){
-          for(i in seq_len(ncol(dat)))
-		  {
-			  idx <- dat[,i]>range[i]
-			  if(any(idx))
-			  {
-				  warning("Some data values of '", cn[i], "' channel exceed its $PnR value ", range[i], " and will be truncated!"
-				  			, "\n To avoid truncation, either fix $PnR before generating FCS or set 'truncate_max_range = FALSE'")
-				  dat[idx,i] <- range[i]
-				  
-			  }
-			  
-		  }
-        }
+  # TODO why are we transforming here?
 
-        if(!is.null(min.limit))
-		{
-			idx <- dat<min.limit
-			if(any(idx))
-			{
-				warning("Some data value are below 'min.limit' ", min.limit, " and will be truncated"
-						, "\n To avoid truncation, set 'min.limit = NULL'")
-				dat[idx] <- min.limit
-				
-			}
-		}
+  ## Transform or scale if necessary
+  # J.Spidlen, Nov 13, 2013: added the flowCore_fcsPnGtransform keyword, which is
+  # set to "linearize-with-PnG-scaling" when transformation="linearize-with-PnG-scaling"
+  # in read.FCS(). This does linearization for log-stored parameters and also division by
+  # gain ($PnG value) for linearly stored parameters. This is how the channel-to-scale
+  # transformation should be done according to the FCS specification (and according to
+  # Gating-ML 2.0), but lots of software tools are ignoring the $PnG division. I added it
+  # so that it is only done when specifically asked for so that read.FCS remains backwards
+  # compatible with previous versions.
+  fcsPnGtransform <- FALSE
+  flowCore_fcsPnGtransform <- readFCSgetPar(x, "flowCore_fcsPnGtransform", strict=FALSE)
+  if(!is.na(flowCore_fcsPnGtransform) && flowCore_fcsPnGtransform == "linearize-with-PnG-scaling") fcsPnGtransform <- TRUE
+  if(transformation) {
+    ampliPar <- readFCSgetPar(x, paste("$P", 1:nrpar, "E", sep=""),
+                              strict=FALSE)
+    noPnE <- is.na(ampliPar)
+    if(any(noPnE)) {
+      warning("No '$PnE' keyword available for the following channels: ",
+              paste(which(noPnE), collapse=", "), "\nUsing '0,0' as default.",
+              call.=FALSE)
+      ampliPar[noPnE] <- "0,0"
     }
+    ampli <- do.call(rbind,lapply(ampliPar, function(x)
+      as.numeric(unlist(strsplit(x,",")))))
+    PnGPar <- readFCSgetPar(x, paste("$P", 1:nrpar, "G", sep=""), strict=FALSE)
+    noPnG <- is.na(PnGPar)
+    if(any(noPnG)) PnGPar[noPnG] <- "1"
+    PnGPar = as.numeric(PnGPar)
 
-    ## Transform or scale if necessary
-    # J.Spidlen, Nov 13, 2013: added the flowCore_fcsPnGtransform keyword, which is
-    # set to "linearize-with-PnG-scaling" when transformation="linearize-with-PnG-scaling"
-    # in read.FCS(). This does linearization for log-stored parameters and also division by
-    # gain ($PnG value) for linearly stored parameters. This is how the channel-to-scale
-    # transformation should be done according to the FCS specification (and according to
-    # Gating-ML 2.0), but lots of software tools are ignoring the $PnG division. I added it
-    # so that it is only done when specifically asked for so that read.FCS remains backwards
-    # compatible with previous versions.
-    fcsPnGtransform <- FALSE
-    flowCore_fcsPnGtransform <- readFCSgetPar(x, "flowCore_fcsPnGtransform", strict=FALSE)
-    if(!is.na(flowCore_fcsPnGtransform) && flowCore_fcsPnGtransform == "linearize-with-PnG-scaling") fcsPnGtransform <- TRUE
-    if(transformation)
-    {
-       ampliPar <- readFCSgetPar(x, paste("$P", 1:nrpar, "E", sep=""),
-             strict=FALSE)
-       noPnE <- is.na(ampliPar)
-       if(any(noPnE))
-       {
-          warning("No '$PnE' keyword available for the following channels: ",
-                paste(which(noPnE), collapse=", "), "\nUsing '0,0' as default.",
-                call.=FALSE)
-          ampliPar[noPnE] <- "0,0"
-       }
-       ampli <- do.call(rbind,lapply(ampliPar, function(x)
-                   as.numeric(unlist(strsplit(x,",")))))
-       PnGPar <- readFCSgetPar(x, paste("$P", 1:nrpar, "G", sep=""), strict=FALSE)
-       noPnG <- is.na(PnGPar)
-       if(any(noPnG)) PnGPar[noPnG] <- "1"
-       PnGPar = as.numeric(PnGPar)
-
-       for (i in 1:nrpar){
-          if(ampli[i,1] > 0 && dattype == "integer"){
-             # J.Spidlen, Nov 5, 2013: This was a very minor bug. The linearization transformation
-             # for $PnE != "0,0" is defined as:
-             # For $PnR/r/, r>0, $PnE/f,0/, f>0: n is a logarithmic parameter with channel values
-             # from 0 to r-1. A channel value xc is converted to a scale value xs as xs=10^(f*xc/r).
-             # Note the "r" instead of the "r-1" in the formula (which would admitedly make more sense)
-			 # However, this is the standard that apparently has been followed by BD and other companies
-             # "forever" and it is therefore addoped as such by the ISAC DSTF (see FCS 3.1 specification)
-             # To bring this to compliance, I am just changing
-             # dat[,i] <- 10^((dat[,i]/(range[i]-1))*ampli[i,1])
-             # to
-             # dat[,i] <- 10^((dat[,i]/range[i])*ampli[i,1])
-             # M.Jiang, Jan 28, 2018. Based on the standard, formula should be  xs = 10^(f1 * xc /(r)) * f2.
-             if(ampli[i,2] == 0)
-               ampli[i,2] = 1 #correct f2 value for legacy FCS
-             dat[,i] <- 10^((dat[,i]/range[i])*ampli[i,1])*ampli[i,2]
-             range[i] <- 10^ampli[i,1]*ampli[i,2]
-          }
-          else if (fcsPnGtransform && PnGPar[i] != 1) {
-             dat[,i] <- dat[,i] / PnGPar[i]
-             range[i] <- (range[i]-1) / PnGPar[i]
-          }
-          else
-             range[i] <- range[i]-1
-
-       }
+    for (i in 1:nrpar){
+      if(ampli[i,1] > 0 && dattype == "integer"){
+        # J.Spidlen, Nov 5, 2013: This was a very minor bug. The linearization transformation
+        # for $PnE != "0,0" is defined as:
+        # For $PnR/r/, r>0, $PnE/f,0/, f>0: n is a logarithmic parameter with channel values
+        # from 0 to r-1. A channel value xc is converted to a scale value xs as xs=10^(f*xc/r).
+        # Note the "r" instead of the "r-1" in the formula (which would admitedly make more sense)
+        # However, this is the standard that apparently has been followed by BD and other companies
+        # "forever" and it is therefore addoped as such by the ISAC DSTF (see FCS 3.1 specification)
+        # To bring this to compliance, I am just changing
+        # dat[,i] <- 10^((dat[,i]/(range[i]-1))*ampli[i,1])
+        # to
+        # dat[,i] <- 10^((dat[,i]/range[i])*ampli[i,1])
+        # M.Jiang, Jan 28, 2018. Based on the standard, formula should be  xs = 10^(f1 * xc /(r)) * f2.
+        if(ampli[i,2] == 0)
+          ampli[i,2] = 1 #correct f2 value for legacy FCS
+        dat[,i] <- 10^((dat[,i]/range[i])*ampli[i,1])*ampli[i,2]
+        range[i] <- 10^ampli[i,1]*ampli[i,2]
+      }
+      else if (fcsPnGtransform && PnGPar[i] != 1) {
+        dat[,i] <- dat[,i] / PnGPar[i]
+        range[i] <- (range[i]-1) / PnGPar[i]
+      }
+      else
+        range[i] <- range[i]-1
     }
-    if(scale){
-        d = 10^decades
-        for(i in 1:nrpar)
-            if(ampli[i,1] > 0 && dattype == "integer"){
-               dat[,i] <- d*((dat[,i]-1)/(range[i]-1))
-               range[i] <- d*(range[i]/range[i]-1)
-            } else{
-                dat[,i] <- d*((dat[,i])/(range[i]))
-                range[i] <- d
-            }
-    }
-    attr(dat, "ranges") <- range
-    return(dat)
+  }
+  if(scale){
+    d = 10^decades
+    for(i in 1:nrpar)
+      if(ampli[i,1] > 0 && dattype == "integer"){
+        dat[,i] <- d*((dat[,i]-1)/(range[i]-1))
+        range[i] <- d*(range[i]/range[i]-1)
+      } else{
+        dat[,i] <- d*((dat[,i])/(range[i]))
+        range[i] <- d
+      }
+  }
+  attr(dat, "ranges") <- range
+  return(dat)
 }
 
 
