@@ -853,6 +853,7 @@ sortBytes1 <- function(bytes, byte_order){
 # function with at most .Machine$integer.max bytes each time.
 .readFCSdataRawMultiple <- function(con, dattype, count, size, signed, endian,
                                     splitInt = FALSE, byte_order) {
+  # TODO dattype needs to be a vector for each column
   chunk_size <- floor(.Machine$integer.max / size)
   num_chunks <- ceiling(count / chunk_size)
 
@@ -999,12 +1000,31 @@ update_channel_by_alias <- function(orig_chnl_names, channel_alias, silent = FAL
   return (new_channels)
   
 }
+
+datatypeToClass <- function(s) {
+  # NOTE this apparently can't parse ASCII files
+  if (is.na(s)) {
+    s
+  } else {
+    switch(
+      s,
+      "I" = "integer",
+      "F" = "numeric",
+      "D" = "numeric",
+      stop(paste("Don't know how to deal with $DATATYPE", s))
+    )
+  }
+}
+
+
 ## ==========================================================================
 ## read FCS file data section
 ## - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 readFCSdata <- function(con, offsets, x, transformation, which.lines,
                         scale, alter.names, decades, min.limit=-111,
                         truncate_max_range = TRUE, channel_alias = NULL) {
+
+  version <- offsets[["FCSversion"]]
   
   byte_order <- readFCSgetPar(x, "$BYTEORD")  
   # TODO mixed not allowed in 3.2
@@ -1014,14 +1034,6 @@ readFCSdata <- function(con, offsets, x, transformation, which.lines,
                    "1,2" = "little",
                    "1,2,3,4" = "little",
                    "mixed")
-  
-  # NOTE this apparently can't parse ASCII files
-  dattype <- switch(readFCSgetPar(x, "$DATATYPE"),
-                    "I" = "integer",
-                    "F" = "numeric",
-                    "D" = "numeric",
-                    stop(paste("Don't know how to deal with $DATATYPE",
-                               readFCSgetPar(x, "$DATATYPE"))))
 
   # NOTE pretty sure this can be other stuff in earlier versions
   if (readFCSgetPar(x, "$MODE") != "L")
@@ -1030,6 +1042,18 @@ readFCSdata <- function(con, offsets, x, transformation, which.lines,
 
   nrpar    <- as.integer(readFCSgetPar(x, "$PAR"))
   nrowTotal <- as.integer(readFCSgetPar(x, "$TOT"))
+
+  dattype <- datatypeToClass(readFCSgetPar(x, "$DATATYPE"))
+
+  if (version == 3.2) {
+    dattype_vec <- sapply(
+      readFCSgetPar(x, paste("$P", 1:nrpar, "DATTYPE", sep=""), strict = FALSE),
+      datatypeToClass
+    )
+    dattype_vec[is.na(dattype_vec)] <- dattype
+  } else {
+    dattype_vec <- NULL
+  }
 
   # TODO why is this here?
   if( "transformation" %in% names(x) &&  x[["transformation"]] == "custom"){
@@ -1116,39 +1140,39 @@ readFCSdata <- function(con, offsets, x, transformation, which.lines,
     # NOTE; if I understand this correctly, it should never run because "bytes"
     # doesn't appear to be used anywhere. The only way this makes sense is if
     # one of these functions works by side effect
-    if (multiSize) {
-      if (nBytes > .Machine$integer.max) {
-        stop(
-          paste0("cannot import files with more than ", .Machine$integer.max,
-                 " bytes in data segment when file has multiple bitwidths")
-        )
-      }
-      nBytes <- as.integer(nBytes)
+    ## if (multiSize) {
+    ##   if (nBytes > .Machine$integer.max) {
+    ##     stop(
+    ##       paste0("cannot import files with more than ", .Machine$integer.max,
+    ##              " bytes in data segment when file has multiple bitwidths")
+    ##     )
+    ##   }
+    ##   nBytes <- as.integer(nBytes)
 
-      #	      if(splitInt&&dattype=="integer")
-      #	        stop("Mutliple bitwidths with big integer are not supported!")
-      # TODO not allowed in 3.2
-      if(endian == "mixed")
-        stop("Cant't handle diverse bitwidths while endian is mixed: ", byte_order)
+    ##   #	      if(splitInt&&dattype=="integer")
+    ##   #	        stop("Mutliple bitwidths with big integer are not supported!")
+    ##   # TODO not allowed in 3.2
+    ##   if(endian == "mixed")
+    ##     stop("Cant't handle diverse bitwidths while endian is mixed: ", byte_order)
       
-      # TODO this confuses me, I don't see where this value is used ever again
-      bytes <- readBin(con=con, what="raw",n = nBytes, size = 1)
-      # browser()
-      if(dattype == "numeric" && length(unique(size)) > 1)
-        stop("we don't support different bitwdiths for numeric data type!")
-    } else {
+    ##   # TODO this confuses me, I don't see where this value is used ever again
+    ##   bytes <- readBin(con=con, what="raw",n = nBytes, size = 1)
+    ##   # browser()
+    ##   if(dattype == "numeric" && length(unique(size)) > 1)
+    ##     stop("we don't support different bitwdiths for numeric data type!")
+    ## } else {
       # NOTE ...in this case, this is the only bit here that matters
       # TODO datatype should be a vector (per column)
       dat <-
         .readFCSdataRawMultiple(
           con, dattype, count = nBytes / size, size = size, signed = signed,
           endian=endian, splitInt = splitInt, byte_order = byte_order)
-    }
+    ## }
   } else {
     # Read subset of lines, as selected by user.
-    if (multiSize) {
-      stop("'which.lines' cannot be used with multiple bitwidths")
-    }
+    ## if (multiSize) {
+    ##   stop("'which.lines' cannot be used with multiple bitwidths")
+    ## }
 
     # Verify that which.lines is positive and within file limit.
     if (length(which.lines) > 1) {
